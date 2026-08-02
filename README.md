@@ -4,7 +4,7 @@ A benchmarking and adaptation pipeline for pathology foundation models on H&E co
 
 ## Purpose
 
-Takes a pretrained pathology foundation model, fine-tunes it for tissue classification, and checks whether it actually generalizes — evaluated not just on held-out data from the same source, but on a completely separate patient cohort it's never seen. Built end-to-end on public data (NCT-CRC-HE-100K / CRC-VAL-HE-7K), at a scale that runs on a single consumer GPU.
+This repo works on taking a pretrained pathology foundation model, fine-tuning it for tissue classification, and checking whether it actually generalizes. However evaluated not just on held-out data from the same source, but on a completely separate patient cohort it's never seen. Built end-to-end on public data (NCT-CRC-HE-100K / CRC-VAL-HE-7K), at a scale that runs on a single consumer GPU.
 
 ## Approach
 
@@ -13,7 +13,7 @@ The project runs a two-stage comparison of pathology foundation models for diagn
 **Status**
 
 *Complete (MVP):* 
-- Dataset exploration completed. Basic utilities generated for visualization and data exploration. Project structure setup.
+- Dataset exploration completed. Basic utilities generated for visualization and data exploration. Normalization explored. Project structure setup.
 
 *In progress / planned:*
 - **Stage 1 frozen-probe benchmark**: H-Optimus-0 vs. ImageNet-ViT control, raw vs. Macenko-normalized, single seed"]

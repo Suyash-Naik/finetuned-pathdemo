@@ -1,0 +1,57 @@
+---
+title: "Pathology Fine-Tuning Benchmark"
+---
+
+## Introduction
+
+This repository contains code and notebooks for a benchmark of fine-tuning for pathology image classification. 
+
+The pipeline is built on a pretrained pathology foundation model, fine-tuning it for tissue classification, and checking whether it actually generalizes. The porject is designed in a step wise manner, with each notebook building on the previous one. The notebooks are designed to be run in order, and the results of each notebook are used in the next one.
+
+## Dataset description
+
+- Dataset: [NCT-CRC-HE-100K](https://zenodo.org/record/1214456#.Y9g0kHbMLIU) and [CRC-VAL-HE-7K](https://zenodo.org/record/1214456#.Y9g0kHbMLIU)
+- Classes: 9 tissue classes. 
+    - Adipose (ADI): Fat tissue. 
+    - Background (BACK): Background elements. 
+    - Debris (DEB): Debris within the sample.
+    - Lymphocytes (LYM): Lymphocytes, which are a type of white blood cell.
+    - Mucus (MUC): Mucus found within the sample.
+    - Smooth muscle (MUS): Muscle fibers found in the gastrointestinal tract.
+    - Normal colon mucosa (NORM): Normal tissue lining the colon.
+    - Cancer-associated stroma (STR): Connective tissue associated with cancer growth.
+    - Colorectal adenocarcinoma epithelial (TUM): Epithelial cells from colorectal adenocarcinoma, a type of colon cancer.
+- Size: 224x224 pixels (px) at 0.5 microns per pixel (MPP)
+
+## Status
+
+
+*Complete (MVP):* 
+- Dataset exploration completed. Basic utilities generated for visualization and data exploration. Project structure setup.
+
+*In progress / planned:*
+- **Stage 1 frozen-probe benchmark**: H-Optimus-0 vs. ImageNet-ViT control, raw vs. Macenko-normalized, single seed"]
+- **Additional encoders** for the Stage 1 comparison: CTransPath, UNI, or Prov-GigaPath, if access and time allows.
+- **Stain-augmented condition**: random stain-color jitter during training, compared against Macenko normalization as an alternative strategy for handling staining variation.
+- **Multi-seed + confidence intervals**: repeat each experiment across 3-5 random seeds to confirm differences between models are real, not run-to-run noise.
+- **Stain-swap counterfactual**: re-normalize a correctly-classified image to a different lab's stain profile and re-test — a flipped prediction would mean the model is partly relying on stain color rather than tissue structure.
+- **Cohort-separability audit**: check whether a simple classifier can tell training-cohort vs. external-cohort patches apart from their embeddings alone — easy separability would signal a batch-effect shortcut rather than genuine biological generalization.
+
+**Stage 1 — Frozen representation benchmark.** A candidate pathology-pretrained encoder (plus an ImageNet-pretrained control, to isolate the value of domain-specific pretraining) produces embeddings for every tissue patch. A linear probe is trained on top of each set of frozen embeddings and evaluated under matched conditions — raw images vs. Macenko-normalized images — to isolate how much normalization actually contributes.
+
+**Stage 2 — Fine-tuned adaptation.** The Stage 1 encoder is adapted further via parameter-efficient fine-tuning (LoRA) and compared directly against its own frozen-probe baseline, reporting the result in whichever direction it falls.
+
+## Notebooks
+
+Walk through the analysis in order:
+
+1. **[Data Exploration](notebooks/01-data_exploration.ipynb)** — dataset structure, class balance, staining variation across cohorts
+2. **[Stain Normalization](notebooks/02-stain_normalization.ipynb)** — Macenko normalization, before/after 
+3. **[Linear Probe](notebooks/03-feature_extraction_linear_probe.ipynb)** — frozen-embedding baseline
+4. **[Fine-Tuning](notebooks/04-finetuning.ipynb)** — LoRA adaptation vs. frozen baseline
+5. **[Interpretability](notebooks/05-interpretability.ipynb)** — attention/saliency
+6. **[Results](notebooks/06-results_summary.ipynb)** — summary and external-cohort validation
+
+## Code
+
+Source lives in [`src/utilities/`](https://github.com/Suyash-Naik/path-ft-bench/tree/main/src/utilities); full repo at [github.com/Suyash-Naik/path-ft-bench](https://github.com/Suyash-Naik/path-ft-bench).

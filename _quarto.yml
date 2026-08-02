@@ -1,0 +1,38 @@
+project:
+  type: website
+  output-dir: _site
+
+website:
+  title: "Pathology Fine-Tuning Benchmark"
+  description: "Adapting pathology foundation models to colorectal histology, validated against an external patient cohort"
+  repo-url: https://github.com/Suyash-Naik/path-ft-bench
+  repo-actions: [issue]
+  navbar:
+    left:
+      - href: index.qmd
+        text: Overview
+      - href: notebooks/01-data_exploration.ipynb
+        text: Data Exploration
+      - href: notebooks/02-data_normalization.ipynb
+        text: Stain Normalization
+      - href: notebooks/03-feature_extraction_linear_probe.ipynb
+        text: Linear Probe
+      - href: notebooks/04-finetuning.ipynb
+        text: Fine-Tuning
+      - href: notebooks/05-interpretability.ipynb
+        text: Interpretability
+      - href: notebooks/06-results_summary.ipynb
+        text: Results
+    right:
+      - icon: github
+        href: https://github.com/Suyash-Naik/path-ft-bench
+
+format:
+  html:
+    theme: cosmo
+    toc: true
+    code-fold: show
+    code-tools: true
+
+execute:
+  freeze: auto

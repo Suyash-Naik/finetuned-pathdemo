@@ -29,7 +29,8 @@ def load_image_array(image_path, reader=bioio_tifffile.reader.Reader):
 def fit_macenko_normalizer(reference_path, reader=bioio_tifffile.reader.Reader):
     """
     Fits a Macenko normalizer to a single reference image.
-    Returns the fitted normalizer — reuse it across every normalize_image() call
+    Returns the fitted normalizer 
+    reuse across every normalize_image() call
     rather than re-fitting per image.
     """
     reference_array = load_image_array(reference_path, reader=reader)
@@ -59,7 +60,7 @@ def normalize_image(image_path, normalizer, reader=bioio_tifffile.reader.Reader)
     return norm.numpy().astype(np.uint8)
 
 
-def sanity_check_normalization(root_path, normalizer, n_samples=6,
+def check_normalization(root_path, normalizer, n_samples=6,
                                 reader=bioio_tifffile.reader.Reader, seed=69):
     """
     Picks n_samples random images from anywhere under root_path, normalizes each,
@@ -87,43 +88,69 @@ def sanity_check_normalization(root_path, normalizer, n_samples=6,
         fig.update_yaxes(visible=False, row=2, col=col + 1, scaleanchor=f"x{col+1}")
 
     fig.update_layout(
-        title="Macenko normalization — sanity check (raw vs. normalized)",
+        title="Macenko normalization sanity check (raw vs. normalized)",
         width=n_samples * 180 + 60, height=420,
         margin=dict(t=80, l=60, r=20, b=20),
     )
     return fig
 
-
-def plot_normalized_class_grid(root_path, normalizer, n_samples=4,
-                                reader=bioio_tifffile.reader.Reader, seed=42):
+def collect_normalized_grid_data(root_path, normalizer, n_samples=3,
+                                   reader=bioio_tifffile.reader.Reader, seed=42):
     """
-    Same layout as plot_class_sample_grid, but shows Macenko-normalized tiles.
-    Uses the same seed as the original unnormalized grid so the two figures
-    show the exact same underlying patches, for a direct before/after comparison.
+    Normalizes sample images per class and returns the results as plain numpy
+    arrays (or None for failures), with no plotting — separates the
+    torch/normalization work from any rendering step.
     """
     class_dirs = sorted([d for d in Path(root_path).iterdir() if d.is_dir()])
     rng = random.Random(seed)
+    grid_data = {}
 
-    n_classes = len(class_dirs)
-    fig, axes = plt.subplots(n_classes, n_samples, figsize=(n_samples * 2.2, n_classes * 2.2))
-    fig.suptitle("Sample patches per tissue class, Macenko-normalized", fontsize=20)
-
-    for row, class_dir in enumerate(class_dirs):
+    for class_dir in class_dirs:
         tif_files = list(class_dir.glob("*.tif"))
-        if not tif_files:
-            print(f"Warning: no .tif files found in {class_dir.name}")
-            continue
-
         sample_files = rng.sample(tif_files, min(n_samples, len(tif_files)))
+        results = []
+        for f in sample_files:
+            norm = normalize_image(f, normalizer, reader=reader)
+            results.append(norm)  # None on failure, array on success
+        grid_data[class_dir.name] = results
 
-        for col in range(n_samples):
-            ax = axes[row, col]
-            if col < len(sample_files):
-                norm = normalize_image(sample_files[col], normalizer, reader=reader)
-                if norm is not None:
-                    ax.imshow(norm)
-            ax.axis("off")
-            ax.set_title(class_dir.name, fontsize=16)
+    return grid_data
 
-    plt.tight_layout()
-    plt.show()
+def plot_grid_from_data_plotly(grid_data, title="Sample patches per tissue class, Macenko-normalized"):
+    """
+    Plots pre-computed grid_data (from collect_normalized_grid_data) using Plotly
+    instead of matplotlib, to avoid the torch/matplotlib native-library conflict.
+    """
+    class_names = list(grid_data.keys())
+    n_classes = len(class_names)
+    n_samples = max(len(v) for v in grid_data.values())
+
+    fig = make_subplots(
+        rows=n_classes, cols=n_samples,
+        horizontal_spacing=0.01, vertical_spacing=0.02,
+        row_titles=class_names,
+    )
+
+    for row, class_name in enumerate(class_names):
+        for col, img in enumerate(grid_data[class_name]):
+            r, c = row + 1, col + 1
+            if img is not None:
+                fig.add_trace(go.Image(z=img), row=r, col=c)
+            else:
+                fig.add_annotation(
+                    text="N/A<br>(no stain signal)", showarrow=False,
+                    xref=f"x{'' if r==1 and c==1 else r*n_samples - n_samples + c}",
+                    yref=f"y{'' if r==1 and c==1 else r*n_samples - n_samples + c}",
+                    x=0.5, y=0.5, font=dict(size=10),
+                    row=r, col=c,
+                )
+            fig.update_xaxes(visible=False, row=r, col=c)
+            fig.update_yaxes(visible=False, row=r, col=c, scaleanchor=f"x{c}" if r == 1 else None)
+
+    fig.update_layout(
+        title=title,
+        width=n_samples * 160 + 100,
+        height=n_classes * 130,
+        margin=dict(t=80, l=100, r=20, b=20),
+    )
+    return fig

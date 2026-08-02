@@ -116,7 +116,7 @@ def collect_normalized_grid_data(root_path, normalizer, n_samples=3,
 
     return grid_data
 
-def plot_grid_from_data_plotly(grid_data, title="Sample patches per tissue class, Macenko-normalized"):
+def plot_grid_from_data(grid_data, title="Sample patches per tissue class, Macenko-normalized"):
     """
     Plots pre-computed grid_data (from collect_normalized_grid_data) using Plotly
     instead of matplotlib, to avoid the torch/matplotlib native-library conflict.
@@ -154,3 +154,144 @@ def plot_grid_from_data_plotly(grid_data, title="Sample patches per tissue class
         margin=dict(t=80, l=100, r=20, b=20),
     )
     return fig
+
+
+def compute_normalized_channel_stats(root_path, normalizer, n_samples_per_class=200,
+                                       reader=bioio_tifffile.reader.Reader, seed=42):
+    """
+    Same as compute_channel_stats, but normalizes each patch first.
+    Failed normalizations (e.g. BACK patches with no stain signal) are skipped
+    and counted separately rather than silently dropped.
+    """
+    class_dirs = sorted([d for d in Path(root_path).iterdir() if d.is_dir()])
+    rng = random.Random(seed)
+    stats = {}
+    all_pixels = []
+
+    for class_dir in class_dirs:
+        tif_files = list(class_dir.glob("*.tif"))
+        if not tif_files:
+            continue
+        sample_files = rng.sample(tif_files, min(n_samples_per_class, len(tif_files)))
+
+        pixels = []
+        n_failed = 0
+        for f in sample_files:
+            norm = normalize_image(f, normalizer, reader=reader)
+            if norm is None:
+                n_failed += 1
+                continue
+            pixels.append(norm.reshape(-1, norm.shape[-1]))
+
+        if not pixels:
+            print(f"Warning: all normalizations failed for {class_dir.name}, skipping")
+            continue
+
+        pixels = np.concatenate(pixels, axis=0)
+        stats[class_dir.name] = {
+            "mean": pixels.mean(axis=0).tolist(),
+            "std": pixels.std(axis=0).tolist(),
+            "n": len(sample_files) - n_failed,
+            "n_failed": n_failed,
+        }
+        all_pixels.append(pixels)
+
+    overall = np.concatenate(all_pixels, axis=0)
+    stats["overall"] = {"mean": overall.mean(axis=0).tolist(), "std": overall.std(axis=0).tolist(),
+                         "n": sum(v["n"] for k, v in stats.items())}
+    return stats
+
+def compute_variance_reduction(stats_before, stats_after, exclude_keys=("overall",)):
+    """
+    For each class, computes the % reduction in per-channel std after normalization.
+    Positive = normalization tightened the distribution (expected direction).
+    """
+    classes = [k for k in stats_before.keys() if k not in exclude_keys and k in stats_after]
+    reduction = {}
+    for cls in classes:
+        std_before = np.array(stats_before[cls]["std"])
+        std_after = np.array(stats_after[cls]["std"])
+        pct_reduction = ((std_before - std_after) / std_before) * 100
+        reduction[cls] = pct_reduction.mean()  # averaged across R, G, B
+    return reduction
+
+
+def plot_variance_reduction(reduction, title="Std reduction after Macenko normalization"):
+    fig = go.Figure()
+    classes = list(reduction.keys())
+    values = list(reduction.values())
+    colors = ["#2ca02c" if v > 0 else "#c44e52" for v in values]
+    fig.add_trace(go.Bar(x=classes, y=values, marker_color=colors))
+    fig.add_hline(y=0, line_color="black", line_width=1)
+    fig.update_layout(
+        title=title,
+        xaxis_title="Tissue class",
+        yaxis_title="% reduction in channel std (mean of R,G,B)",
+        width=800, height=400,
+        margin=dict(t=80, l=60, r=20, b=20),
+    )
+    return fig
+
+def plot_channel_stats_comparison(stats_before, stats_after, exclude_keys=("overall",)):
+    """
+    Combined figure: mean-color swatch strips (raw, normalized) stacked above
+    a grouped bar chart comparing per-channel mean ± std, raw vs. normalized.
+    """
+    classes = [k for k in stats_before.keys() if k not in exclude_keys and k in stats_after]
+    channels = ["R", "G", "B"]
+    bar_colors = ["#d62728", "#2ca02c", "#1f77b4"]
+
+    raw_swatch_colors = [
+        f"rgb({stats_before[c]['mean'][0]:.0f},{stats_before[c]['mean'][1]:.0f},{stats_before[c]['mean'][2]:.0f})"
+        for c in classes
+    ]
+    norm_swatch_colors = [
+        f"rgb({stats_after[c]['mean'][0]:.0f},{stats_after[c]['mean'][1]:.0f},{stats_after[c]['mean'][2]:.0f})"
+        for c in classes
+    ]
+
+    fig = make_subplots(
+        rows=3, cols=1,
+        row_heights=[0.1, 0.1, 0.8],
+        vertical_spacing=0.04,
+        subplot_titles=("Mean color — raw", "Mean color — normalized",
+                         "Per-channel mean ± std: raw (faded) vs. normalized (solid)"),
+    )
+
+    fig.add_trace(go.Bar(x=classes, y=[1] * len(classes), marker_color=raw_swatch_colors,
+                          hovertext=raw_swatch_colors, hoverinfo="text", showlegend=False),
+                  row=1, col=1)
+    fig.add_trace(go.Bar(x=classes, y=[1] * len(classes), marker_color=norm_swatch_colors,
+                          hovertext=norm_swatch_colors, hoverinfo="text", showlegend=False),
+                  row=2, col=1)
+
+    for c_idx, channel in enumerate(channels):
+        means = [stats_before[cls]["mean"][c_idx] for cls in classes]
+        stds = [stats_before[cls]["std"][c_idx] for cls in classes]
+        fig.add_trace(go.Bar(x=classes, y=means, error_y=dict(type="data", array=stds),
+                              name=f"{channel} (raw)", marker_color=bar_colors[c_idx], opacity=0.45,
+                              legendgroup="raw", offsetgroup=c_idx),
+                      row=3, col=1)
+
+    for c_idx, channel in enumerate(channels):
+        means = [stats_after[cls]["mean"][c_idx] for cls in classes]
+        stds = [stats_after[cls]["std"][c_idx] for cls in classes]
+        fig.add_trace(go.Bar(x=classes, y=means, error_y=dict(type="data", array=stds),
+                              name=f"{channel} (normalized)", marker_color=bar_colors[c_idx], opacity=1.0,
+                              legendgroup="normalized", offsetgroup=c_idx + 3),
+                      row=3, col=1)
+
+    fig.update_yaxes(visible=False, range=[0, 1], row=1, col=1)
+    fig.update_yaxes(visible=False, range=[0, 1], row=2, col=1)
+    fig.update_xaxes(visible=False, row=1, col=1)
+    fig.update_xaxes(visible=False, row=2, col=1)
+    fig.update_yaxes(title_text="Pixel intensity (0-255)", row=3, col=1)
+
+    fig.update_layout(
+        barmode="group",
+        title="Mean patch color and per-channel stats: raw vs. Macenko-normalized",
+        legend=dict(title="Channel / condition"),
+        width=1000, height=780,
+    )
+    return fig
+

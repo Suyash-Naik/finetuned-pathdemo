@@ -185,3 +185,66 @@ def plot_color_shift(shifts, title="Mean color shift: NCT vs CRC-VAL"):
                     xytext=(0, 3), textcoords="offset points", ha="center", fontsize=9)
     plt.tight_layout()
     plt.show()
+
+def plot_channel_stats_comparison(stats_before, stats_after, exclude_keys=("overall",)):
+    """
+    Combined figure: mean-color swatch strips (raw, normalized) stacked above
+    a grouped bar chart comparing per-channel mean ± std, raw vs. normalized.
+    """
+    classes = [k for k in stats_before.keys() if k not in exclude_keys and k in stats_after]
+    channels = ["R", "G", "B"]
+    bar_colors = ["#d62728", "#2ca02c", "#1f77b4"]
+
+    raw_swatch_colors = [
+        f"rgb({stats_before[c]['mean'][0]:.0f},{stats_before[c]['mean'][1]:.0f},{stats_before[c]['mean'][2]:.0f})"
+        for c in classes
+    ]
+    norm_swatch_colors = [
+        f"rgb({stats_after[c]['mean'][0]:.0f},{stats_after[c]['mean'][1]:.0f},{stats_after[c]['mean'][2]:.0f})"
+        for c in classes
+    ]
+
+    fig = make_subplots(
+        rows=3, cols=1,
+        row_heights=[0.1, 0.1, 0.8],
+        vertical_spacing=0.04,
+        subplot_titles=("Mean color — raw", "Mean color — normalized",
+                         "Per-channel mean ± std: raw (faded) vs. normalized (solid)"),
+    )
+
+    fig.add_trace(go.Bar(x=classes, y=[1] * len(classes), marker_color=raw_swatch_colors,
+                          hovertext=raw_swatch_colors, hoverinfo="text", showlegend=False),
+                  row=1, col=1)
+    fig.add_trace(go.Bar(x=classes, y=[1] * len(classes), marker_color=norm_swatch_colors,
+                          hovertext=norm_swatch_colors, hoverinfo="text", showlegend=False),
+                  row=2, col=1)
+
+    for c_idx, channel in enumerate(channels):
+        means = [stats_before[cls]["mean"][c_idx] for cls in classes]
+        stds = [stats_before[cls]["std"][c_idx] for cls in classes]
+        fig.add_trace(go.Bar(x=classes, y=means, error_y=dict(type="data", array=stds),
+                              name=f"{channel} (raw)", marker_color=bar_colors[c_idx], opacity=0.45,
+                              legendgroup="raw", offsetgroup=c_idx),
+                      row=3, col=1)
+
+    for c_idx, channel in enumerate(channels):
+        means = [stats_after[cls]["mean"][c_idx] for cls in classes]
+        stds = [stats_after[cls]["std"][c_idx] for cls in classes]
+        fig.add_trace(go.Bar(x=classes, y=means, error_y=dict(type="data", array=stds),
+                              name=f"{channel} (normalized)", marker_color=bar_colors[c_idx], opacity=1.0,
+                              legendgroup="normalized", offsetgroup=c_idx + 3),
+                      row=3, col=1)
+
+    fig.update_yaxes(visible=False, range=[0, 1], row=1, col=1)
+    fig.update_yaxes(visible=False, range=[0, 1], row=2, col=1)
+    fig.update_xaxes(visible=False, row=1, col=1)
+    fig.update_xaxes(visible=False, row=2, col=1)
+    fig.update_yaxes(title_text="Pixel intensity (0-255)", row=3, col=1)
+
+    fig.update_layout(
+        barmode="group",
+        title="Mean patch color and per-channel stats: raw vs. Macenko-normalized",
+        legend=dict(title="Channel / condition"),
+        width=1000, height=780,
+    )
+    return fig

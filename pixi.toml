@@ -25,6 +25,7 @@ seaborn = ">=0.13.2,<0.14"
 napari = ">=0.8.0,<0.9"
 pyqt6 = ">=6.8.1,<7"
 plotly = ">=6.9.0,<7"
+huggingface_hub = ">=1.26.0,<2"
 
 
 [pypi-dependencies]

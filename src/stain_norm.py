@@ -228,24 +228,78 @@ def load_normalizer_target(path, backend='torch'):
     normalizer.HERef = torch.tensor(data["HERef"], dtype=torch.float32)
     normalizer.maxCRef = torch.tensor(data["maxCRef"], dtype=torch.float32)
     return normalizer
-
-def normalize_image(image_path, normalizer, reader=bioio_tifffile.reader.Reader):
+def normalize_array(image_array, normalizer, min_tissue_frac=0.25):
     """
-    Applies a fitted Macenko normalizer to a single image.
-    Returns normalized image as HxWxC uint8, or None if normalization fails
-    (this happens on near-white/background patches with too little stain
-    signal for Macenko's optical-density decomposition to work on).
+    Parameters
+    ----------
+    image_array : ndarray
+        HxWx3 uint8 RGB tile.
+    normalizer : torchstain.normalizers.MacenkoNormalizer
+        Fitted normalizer supplying the target stain basis.
+    min_tissue_frac : float, optional
+        Minimum fraction of pixels exceeding the optical-density threshold
+        (see tissue_fraction) required for normalization to be attempted.
+ 
+    Returns
+    -------
+    tuple of (ndarray or None, str or None)
+        On success, (HxWx3 uint8 array, None). On rejection, (None, reason).
+        Reasons are short strings suitable for aggregating into per-class
+        failure counts; "low tissue" and a raised exception support different
+        conclusions about Macenko's applicability and are kept distinct.
+    """
+    # Guard, not try/except: on a near-white tile the decomposition usually
+    # succeeds on an arbitrary basis rather than raising, so there is nothing
+    # to catch. Eligibility has to be decided before it runs.
+    frac = tissue_fraction(image_array)
+    if frac < min_tissue_frac:
+        return None, f"low tissue ({frac:.2f} < {min_tissue_frac})"
+ 
+    try:
+        norm, _, _ = normalizer.normalize(I=_to_tensor_255(image_array), stains=True)
+    except Exception as e:
+        return None, f"{type(e).__name__}: {e}"
+ 
+    arr = np.asarray(norm.detach().cpu() if hasattr(norm, "detach") else norm)
+    if not np.isfinite(arr).all():
+        return None, "non-finite output"
+ 
+    # Reconstruction is Io * exp(-HERef @ C) and can exceed 255 slightly;
+    # an unclipped uint8 cast wraps 260 to 4, scattering near-black pixels
+    # through bright regions. Backend clipping is a version detail.
+    return np.clip(arr, 0, 255).astype(np.uint8), None
+ 
+ 
+def normalize_image(image_path, normalizer, reader=bioio_tifffile.reader.Reader,
+                    min_tissue_frac=0.25, verbose=False):
+    """
+    Parameters
+    ----------
+    image_path : str or Path
+        Path to a single tile.
+    normalizer : torchstain.normalizers.MacenkoNormalizer
+        Fitted normalizer supplying the target stain basis.
+    reader : bioio reader class, optional
+        Reader passed through to load_image_array.
+    min_tissue_frac : float, optional
+        Minimum fraction of pixels above the optical-density threshold.
+    verbose : bool, optional
+        Print the rejection reason for each rejected tile. Default False:
+        rejection is expected at a non-trivial rate on background-heavy
+        classes, and per-tile printing over a full cohort produces tens of
+        thousands of lines.
+ 
+    Returns
+    -------
+    ndarray or None
+        HxWx3 uint8 normalized tile, or None if the tile was rejected.
     """
     image_array = load_image_array(image_path, reader=reader)
-    image_tensor = _to_tensor_255(image_array)
-
-    try:
-        norm, _, _ = normalizer.normalize(I=image_tensor, stains=True)
-    except Exception as e:
-        print(f"Normalization failed for {image_path}: {e}")
-        return None
-
-    return norm.numpy().astype(np.uint8)
+    arr, reason = normalize_array(image_array, normalizer,
+                                  min_tissue_frac=min_tissue_frac)
+    if arr is None and verbose:
+        print(f"Normalization rejected for {image_path}: {reason}")
+    return arr
 
 
 def check_normalization(root_path, normalizer, n_samples=6,

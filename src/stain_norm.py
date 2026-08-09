@@ -143,30 +143,6 @@ def _fit_targets(paths, backend='torch', reader=bioio_tifffile.reader.Reader,
         )
     return kept_paths, np.stack(hes), np.stack(maxcs), reasons
 
-
-def stratified_sample(root_path, n_per_class=40, seed=42, exclude_classes=("BACK",),
-                      pattern="*.tif"):
-    """
-    Samples n_per_class tiles from each class directory under root_path.
-
-    NCT-CRC-HE-100K is not class-balanced, so a flat random sample over all
-    100k tiles is dominated by the largest classes. BACK is excluded by default:
-    it is pure background and contributes no stain information.
-    """
-    rng = random.Random(seed)
-    class_dirs = sorted(d for d in Path(root_path).iterdir() if d.is_dir())
-    sampled = []
-    for class_dir in class_dirs:
-        if class_dir.name in exclude_classes:
-            continue
-        files = sorted(class_dir.glob(pattern))
-        if not files:
-            continue
-        sampled.extend(rng.sample(files, min(n_per_class, len(files))))
-    rng.shuffle(sampled)
-    return sampled
-
-
 def estimate_median_target(image_paths, backend='torch', reader=bioio_tifffile.reader.Reader,
                            min_tissue_frac=0.25, max_workers=8, verbose=True):
     """

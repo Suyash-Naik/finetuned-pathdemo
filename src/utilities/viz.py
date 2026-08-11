@@ -74,91 +74,168 @@ def load_class_samples(root_path, n_samples=4, reader=bioio_tifffile.reader.Read
         ]
     return samples
 
+def load_manifest_samples(cohorts, classes, n_samples=4,
+                          reader=bioio_tifffile.reader.Reader, annotate=None):
+    """
+    Loads tiles from cohort manifests, grouped by (cohort, class).
 
-def plot_interactive_class_grid(samples, n_samples=4):
-    class_names = list(samples.keys())
-
-    fig = make_subplots(rows=1, cols=n_samples, horizontal_spacing=0.02)
-
-    # One trace per (class, slot), placed in its dedicated subplot column
-    for class_idx, class_name in enumerate(class_names):
-        for col, img in enumerate(samples[class_name]):
-            fig.add_trace(
-                go.Image(z=img, visible=(class_idx == 0)),
-                row=1, col=col + 1
-            )
-
-    # Hide axes on every subplot
+    Parameters
+    ----------
+    cohorts : dict of {str: list of dict}
+        Maps a display name to the records list returned by
+        class_sampling.read_manifest. Insertion order is preserved in the
+        dropdown.
+    classes : sequence of str
+        Class labels to include. One group per (cohort, class) pair.
+    n_samples : int, optional
+        Tiles per group, taken as the lowest ranks in that class.
+    reader : bioio reader class, optional
+        Reader passed to BioImage.
+    annotate : callable, optional
+        Called as annotate(image_array); the value is formatted into each
+        tile's caption. Pass stain_norm.tissue_fraction to show the quantity
+        the normalization guard thresholds on, which is what ties the image to
+        the rejection table. Kept as an argument rather than an import so this
+        module does not depend on stain_norm.
+ 
+    Returns
+    -------
+    tuple of (dict, dict)
+        (samples, captions), both keyed by "<cohort> - <class>". samples maps
+        to a list of HxWx3 arrays; captions maps to a list of strings.
+    """
+    samples, captions = {}, {}
+    for cohort_name, records in cohorts.items():
+        for label in classes:
+            recs = sorted((r for r in records if r["label"] == label),
+                          key=lambda r: r["rank"])[:n_samples]
+            if not recs:
+                continue
+            key = f"{cohort_name} - {label}"
+            imgs, caps = [], []
+            for r in recs:
+                img = BioImage(Path(r["path"]), reader=reader).get_image_data("YXS")
+                imgs.append(img)
+                cap = f"rank {r['rank']}"
+                if annotate is not None:
+                    cap += f" | {annotate(img):.2f}"
+                caps.append(cap)
+            samples[key] = imgs
+            captions[key] = caps
+    if not samples:
+        raise ValueError("No groups to plot; check cohort names and class labels")
+    return samples, captions
+ 
+ 
+def plot_interactive_class_grid(samples, n_samples=4, captions=None,
+                                title_prefix="Sample patches"):
+    """
+    Interactive grid of sample tiles with a dropdown to switch group.
+ 
+    Accepts the output of either load_class_samples or load_manifest_samples.
+ 
+    Parameters
+    ----------
+    samples : dict of {str: list of ndarray}
+        Group name to list of HxWx3 arrays.
+    n_samples : int, optional
+        Number of subplot columns. Groups with fewer tiles leave trailing
+        columns empty.
+    captions : dict of {str: list of str}, optional
+        Per-tile captions, same keys as samples. Rendered as subplot titles and
+        swapped with the dropdown selection.
+    title_prefix : str, optional
+        Leading text of the figure title.
+ 
+    Returns
+    -------
+    plotly.graph_objects.Figure
+    """
+    group_names = list(samples.keys())
+ 
+    # Blank placeholders reserve the annotation slots the dropdown rewrites;
+    # make_subplots only creates annotations for titles passed here.
+    fig = make_subplots(rows=1, cols=n_samples, horizontal_spacing=0.02,
+                        subplot_titles=[" "] * n_samples)
+    base_annotations = [a.to_plotly_json() for a in fig.layout.annotations]
+ 
+    # Record which group each trace belongs to rather than deriving it from
+    # trace position: the previous version assumed every group contributed
+    # exactly n_samples traces, so a short group silently shifted the
+    # visibility mask for every group after it.
+    trace_group = []
+    for group_idx, name in enumerate(group_names):
+        for col, img in enumerate(samples[name][:n_samples]):
+            fig.add_trace(go.Image(z=img, visible=(group_idx == 0)),
+                          row=1, col=col + 1)
+            trace_group.append(group_idx)
+ 
     for i in range(1, n_samples + 1):
         fig.update_xaxes(visible=False, row=1, col=i)
         fig.update_yaxes(visible=False, row=1, col=i, scaleanchor=f"x{i}")
-
+ 
+    def _annotations_for(name):
+        if captions is None:
+            return base_annotations
+        caps = captions.get(name, [])
+        out = []
+        for idx, ann in enumerate(base_annotations):
+            ann = dict(ann)
+            ann["text"] = caps[idx] if idx < len(caps) else " "
+            ann["font"] = {"size": 11}
+            out.append(ann)
+        return out
+ 
     buttons = []
-    for class_idx, class_name in enumerate(class_names):
-        visibility = [
-            (i // n_samples) == class_idx
-            for i in range(len(class_names) * n_samples)
-        ]
+    for group_idx, name in enumerate(group_names):
         buttons.append(dict(
-            label=class_name, method="update",
-            args=[{"visible": visibility}, {"title": f"Sample patches — class: {class_name}"}]
+            label=name, method="update",
+            args=[{"visible": [g == group_idx for g in trace_group]},
+                  {"title": f"{title_prefix} - {name}",
+                   "annotations": _annotations_for(name)}],
         ))
-
+ 
     fig.update_layout(
-        updatemenus=[dict(
-            active=0, buttons=buttons, direction="down",
-            x=1.15, xanchor="left", y=1, yanchor="top",
-        )],
-        title=f"Sample patches — class: {class_names[0]}",
-        width=n_samples * 200 + 180,
-        height=260,
-        margin=dict(t=60, r=180, l=20, b=20),
+        updatemenus=[dict(active=0, buttons=buttons, direction="down",
+                          x=1.15, xanchor="left", y=1, yanchor="top")],
+        title=f"{title_prefix} - {group_names[0]}",
+        annotations=_annotations_for(group_names[0]),
+        width=n_samples * 200 + 240,
+        height=300,
+        margin=dict(t=70, r=240, l=20, b=20),
         autosize=False,
     )
     return fig
-
-def plot_channel_stats(stats, exclude_keys=("overall",)):
+ 
+ 
+def summarize_tissue_fraction(samples, tissue_fraction_fn):
     """
-    Visualizes per-class channel stats: a color-swatch strip showing each
-    class's mean RGB color, plus a grouped bar chart of mean ± std per channel.
+    Per-group summary of the measure the normalization guard thresholds on.
+ 
+    The quantitative companion to the grid: a handful of tiles show what a
+    group looks like, this shows whether those tiles were typical. Operates on
+    the arrays already loaded by load_manifest_samples rather than re-reading.
+ 
+    Parameters
+    ----------
+    samples : dict of {str: list of ndarray}
+        Output of load_manifest_samples.
+    tissue_fraction_fn : callable
+        stain_norm.tissue_fraction.
+ 
+    Returns
+    -------
+    pandas.DataFrame
+        Indexed by group, with n and min/median/max tissue fraction.
     """
-    classes = [k for k in stats.keys() if k not in exclude_keys]
-    channels = ["R", "G", "B"]
-
-    fig, (ax_swatch, ax_bar) = plt.subplots(
-        2, 1, figsize=(max(8, len(classes) * 1.1), 7),
-        gridspec_kw={"height_ratios": [1, 3]}
-    )
-
-    # --- Swatch strip ---
-    for i, cls in enumerate(classes):
-        mean_rgb = np.array(stats[cls]["mean"]) / 255.0
-        ax_swatch.add_patch(plt.Rectangle((i, 0), 1, 1, color=mean_rgb))
-        ax_swatch.text(i + 0.5, -0.15, cls, ha="center", va="top", fontsize=10)
-    ax_swatch.set_xlim(0, len(classes))
-    ax_swatch.set_ylim(-0.3, 1)
-    ax_swatch.axis("off")
-    ax_swatch.set_title("Mean patch color per class (unnormalized)", fontsize=13)
-
-    # --- Grouped bar chart with error bars ---
-    x = np.arange(len(classes))
-    width = 0.25
-    colors = ["#d62728", "#2ca02c", "#1f77b4"]  # R, G, B
-
-    for c_idx, channel in enumerate(channels):
-        means = [stats[cls]["mean"][c_idx] for cls in classes]
-        stds = [stats[cls]["std"][c_idx] for cls in classes]
-        ax_bar.bar(x + (c_idx - 1) * width, means, width, yerr=stds,
-                   label=channel, color=colors[c_idx], alpha=0.85, capsize=3)
-
-    ax_bar.set_xticks(x)
-    ax_bar.set_xticklabels(classes)
-    ax_bar.set_ylabel("Pixel intensity (0–255)")
-    ax_bar.set_title("Per-channel mean ± std by class", fontsize=13)
-    ax_bar.legend(title="Channel")
-
-    plt.tight_layout()
-    plt.show()
+    import pandas as pd
+ 
+    rows = []
+    for name, imgs in samples.items():
+        fracs = np.array([tissue_fraction_fn(img) for img in imgs])
+        rows.append({"group": name, "n": len(fracs), "min": fracs.min(),
+                     "median": float(np.median(fracs)), "max": fracs.max()})
+    return pd.DataFrame(rows).set_index("group").round(3)
 
 def compute_cross_cohort_color_shift(stats_a, stats_b, exclude_keys=("overall",)):
     """
@@ -175,76 +252,29 @@ def compute_cross_cohort_color_shift(stats_a, stats_b, exclude_keys=("overall",)
 
 
 def plot_color_shift(shifts, title="Mean color shift: NCT vs CRC-VAL"):
-    fig, ax = plt.subplots(figsize=(8, 4))
-    bars = ax.bar(shifts.keys(), shifts.values(), color="#c44e52")
-    ax.set_ylabel("Euclidean distance (RGB mean)")
-    ax.set_title(title)
-    for bar in bars:
-        height = bar.get_height()
-        ax.annotate(f"{height:.1f}", xy=(bar.get_x() + bar.get_width() / 2, height),
-                    xytext=(0, 3), textcoords="offset points", ha="center", fontsize=9)
-    plt.tight_layout()
-    plt.show()
+    labels = list(shifts.keys())
+    values = list(shifts.values())
 
-def plot_channel_stats_comparison(stats_before, stats_after, exclude_keys=("overall",)):
-    """
-    Combined figure: mean-color swatch strips (raw, normalized) stacked above
-    a grouped bar chart comparing per-channel mean ± std, raw vs. normalized.
-    """
-    classes = [k for k in stats_before.keys() if k not in exclude_keys and k in stats_after]
-    channels = ["R", "G", "B"]
-    bar_colors = ["#d62728", "#2ca02c", "#1f77b4"]
-
-    raw_swatch_colors = [
-        f"rgb({stats_before[c]['mean'][0]:.0f},{stats_before[c]['mean'][1]:.0f},{stats_before[c]['mean'][2]:.0f})"
-        for c in classes
-    ]
-    norm_swatch_colors = [
-        f"rgb({stats_after[c]['mean'][0]:.0f},{stats_after[c]['mean'][1]:.0f},{stats_after[c]['mean'][2]:.0f})"
-        for c in classes
-    ]
-
-    fig = make_subplots(
-        rows=3, cols=1,
-        row_heights=[0.1, 0.1, 0.8],
-        vertical_spacing=0.04,
-        subplot_titles=("Mean color — raw", "Mean color — normalized",
-                         "Per-channel mean ± std: raw (faded) vs. normalized (solid)"),
-    )
-
-    fig.add_trace(go.Bar(x=classes, y=[1] * len(classes), marker_color=raw_swatch_colors,
-                          hovertext=raw_swatch_colors, hoverinfo="text", showlegend=False),
-                  row=1, col=1)
-    fig.add_trace(go.Bar(x=classes, y=[1] * len(classes), marker_color=norm_swatch_colors,
-                          hovertext=norm_swatch_colors, hoverinfo="text", showlegend=False),
-                  row=2, col=1)
-
-    for c_idx, channel in enumerate(channels):
-        means = [stats_before[cls]["mean"][c_idx] for cls in classes]
-        stds = [stats_before[cls]["std"][c_idx] for cls in classes]
-        fig.add_trace(go.Bar(x=classes, y=means, error_y=dict(type="data", array=stds),
-                              name=f"{channel} (raw)", marker_color=bar_colors[c_idx], opacity=0.45,
-                              legendgroup="raw", offsetgroup=c_idx),
-                      row=3, col=1)
-
-    for c_idx, channel in enumerate(channels):
-        means = [stats_after[cls]["mean"][c_idx] for cls in classes]
-        stds = [stats_after[cls]["std"][c_idx] for cls in classes]
-        fig.add_trace(go.Bar(x=classes, y=means, error_y=dict(type="data", array=stds),
-                              name=f"{channel} (normalized)", marker_color=bar_colors[c_idx], opacity=1.0,
-                              legendgroup="normalized", offsetgroup=c_idx + 3),
-                      row=3, col=1)
-
-    fig.update_yaxes(visible=False, range=[0, 1], row=1, col=1)
-    fig.update_yaxes(visible=False, range=[0, 1], row=2, col=1)
-    fig.update_xaxes(visible=False, row=1, col=1)
-    fig.update_xaxes(visible=False, row=2, col=1)
-    fig.update_yaxes(title_text="Pixel intensity (0-255)", row=3, col=1)
-
+    fig = go.Figure(go.Bar(
+        x=labels, y=values,
+        marker_color="#e34948",
+        text=[f"{v:.1f}" for v in values],
+        textposition="outside",
+        textfont=dict(size=11, color="#0b0b0b"),
+        cliponaxis=False,
+    ))
     fig.update_layout(
-        barmode="group",
-        title="Mean patch color and per-channel stats: raw vs. Macenko-normalized",
-        legend=dict(title="Channel / condition"),
-        width=1000, height=780,
+        title=title,
+        yaxis_title="Euclidean distance (RGB mean)",
+        plot_bgcolor="#fcfcfb",
+        paper_bgcolor="#fcfcfb",
+        font=dict(color="#0b0b0b"),
+        yaxis=dict(gridcolor="#e1e0d9", zerolinecolor="#c3c2b7",
+                    range=[0, max(values) * 1.15]),
+        xaxis=dict(showgrid=False),
+        width=800, height=400,
+        margin=dict(t=60, b=40, l=60, r=20),
     )
+    fig.show()
     return fig
+

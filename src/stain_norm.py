@@ -405,47 +405,98 @@ def _stats_from_accumulator(acc):
     return mean, np.sqrt(var)
 
 
+def _rejection_key(reason):
+    """
+    Collapse a rejection reason to a stable bin label.
+ 
+    "low tissue (0.03 < 0.25)" -> "low tissue"
+    "RuntimeError: eigenvalues did not converge" -> "RuntimeError"
+    """
+    if reason.startswith("low tissue"):
+        return "low tissue"
+    if reason == "non-finite output":
+        return "non-finite output"
+    return reason.split(":", 1)[0]
+ 
+ 
 def compute_paired_channel_stats(root_path, normalizer, n_samples_per_class=200,
                                  reader=bioio_tifffile.reader.Reader, seed=42,
-                                 verbose=True):
+                                 paths=None, min_tissue_frac=0.25, verbose=True):
     """
-    Returns (stats_raw, stats_norm) computed on the SAME tiles.
-
-    Why paired: computing the two separately lets them diverge on which tiles
-    they include. compute_normalized_channel_stats drops tiles where Macenko
-    fails (BACK, thin ADI) while the raw pass keeps them, so the "variance
-    reduction" would partly be measuring the removal of background tiles rather
-    than any effect of normalization. Here a tile that fails to normalize is
-    excluded from BOTH sides.
-
-    Uses running sums rather than stacking pixels: 200 tiles x 9 classes is
-    ~0.5 GB of uint8 held twice under the old concatenate approach.
+    Parameters
+    ----------
+    root_path : str or Path
+        Cohort root containing one directory per class. Ignored when `paths`
+        is given.
+    normalizer : torchstain.normalizers.MacenkoNormalizer
+        Fitted normalizer supplying the target stain basis.
+    n_samples_per_class : int, optional
+        Tiles sampled per class. Ignored when `paths` is given.
+    reader : bioio reader class, optional
+        Reader passed through to load_image_array.
+    seed : int, optional
+        Seed for the internal per-class sample. Ignored when `paths` is given.
+    paths : sequence of Path, optional
+        Explicit tile list, grouped by parent directory name. Pass the tiles
+        from a cohort manifest to make the rejection rates describe exactly the
+        tiles that feature extraction will process, so the per-class table
+        predicts the composition of ok_mask rather than estimating it from an
+        independent draw.
+    min_tissue_frac : float, optional
+        Passed to normalize_array.
+    verbose : bool, optional
+        Print a per-class progress line.
+ 
+    Returns
+    -------
+    tuple of (dict, dict)
+        (stats_raw, stats_norm), each keyed by class name plus "overall".
+        Per-class entries carry "mean", "std", "n", "n_failed" and "reasons",
+        where "reasons" maps a rejection bin to a count. The "overall" entry
+        carries "mean", "std" and "n" only.
     """
-    class_dirs = sorted([d for d in Path(root_path).iterdir() if d.is_dir()])
-    rng = random.Random(seed)
+    if paths is not None:
+        grouped = {}
+        for p in paths:
+            grouped.setdefault(Path(p).parent.name, []).append(Path(p))
+        groups = [(name, sorted(files)) for name, files in sorted(grouped.items())]
+    else:
+        rng = random.Random(seed)
+        groups = []
+        # sorted() matters: plain glob() order is filesystem-dependent, and on
+        # a network share it is not guaranteed stable between calls.
+        for class_dir in sorted(d for d in Path(root_path).iterdir() if d.is_dir()):
+            tif_files = sorted(class_dir.glob("*.tif"))
+            if not tif_files:
+                continue
+            groups.append((class_dir.name,
+                           rng.sample(tif_files,
+                                      min(n_samples_per_class, len(tif_files)))))
+ 
     stats_raw, stats_norm = {}, {}
     overall = {k: {"n_px": 0, "sum": np.zeros(3), "sum_sq": np.zeros(3)}
                for k in ("raw", "norm")}
-
-    for class_dir in class_dirs:
-        # sorted() matters: plain glob() order is filesystem-dependent, and on a
-        # network share it is not guaranteed stable between calls.
-        tif_files = sorted(class_dir.glob("*.tif"))
-        if not tif_files:
-            continue
-        sample_files = rng.sample(tif_files, min(n_samples_per_class, len(tif_files)))
-
+ 
+    for class_name, sample_files in groups:
         acc = {k: {"n_px": 0, "sum": np.zeros(3), "sum_sq": np.zeros(3)}
                for k in ("raw", "norm")}
         n_ok = n_failed = 0
-
+        reasons = {}
+ 
         for f in sample_files:
+            # One read per tile. The previous version called normalize_image(f),
+            # which re-opened the same file; on a full cohort this pass is
+            # I/O-bound, so that doubled its cost.
             raw = load_image_array(f, reader=reader)
-            norm = normalize_image(f, normalizer, reader=reader)
+            norm, reason = normalize_array(raw, normalizer,
+                                           min_tissue_frac=min_tissue_frac)
             if norm is None:
                 n_failed += 1
+                key = _rejection_key(reason)
+                reasons[key] = reasons.get(key, 0) + 1
                 continue
             n_ok += 1
+ 
             for key, img in (("raw", raw), ("norm", norm)):
                 px = img.reshape(-1, 3).astype(np.float64)
                 acc[key]["n_px"] += px.shape[0]
@@ -454,27 +505,94 @@ def compute_paired_channel_stats(root_path, normalizer, n_samples_per_class=200,
                 overall[key]["n_px"] += px.shape[0]
                 overall[key]["sum"] += px.sum(axis=0)
                 overall[key]["sum_sq"] += (px ** 2).sum(axis=0)
-
+ 
         if n_ok == 0:
+            # A fully rejected class is a result, not a gap: post-guard this is
+            # the expected outcome for BACK. Record the counts with NaN
+            # statistics so failure_table still reports the class. Consumers
+            # that plot or difference the statistics must skip entries with
+            # n == 0 (compute_variance_reduction, plot_channel_stats_comparison).
+            nan3 = [float("nan")] * 3
+            for target in (stats_raw, stats_norm):
+                target[class_name] = {"mean": nan3, "std": nan3, "n": 0,
+                                      "n_failed": n_failed,
+                                      "reasons": dict(sorted(reasons.items()))}
             if verbose:
-                print(f"Warning: all {len(sample_files)} tiles failed in {class_dir.name}, skipping")
+                detail = " ".join(f"{k}={v}" for k, v in sorted(reasons.items()))
+                print(f"{class_name:6s} n=    0 rejected={n_failed:5d} {detail}"
+                      f"  <- fully rejected")
             continue
-
+ 
         for key, target in (("raw", stats_raw), ("norm", stats_norm)):
             mean, std = _stats_from_accumulator(acc[key])
-            target[class_dir.name] = {"mean": mean.tolist(), "std": std.tolist(),
-                                      "n": n_ok, "n_failed": n_failed}
+            target[class_name] = {"mean": mean.tolist(), "std": std.tolist(),
+                                  "n": n_ok, "n_failed": n_failed,
+                                  "reasons": dict(sorted(reasons.items()))}
         if verbose:
-            print(f"{class_dir.name:6s} n={n_ok:4d} failed={n_failed:3d}")
-
-    if not stats_raw:
+            detail = " ".join(f"{k}={v}" for k, v in sorted(reasons.items()))
+            print(f"{class_name:6s} n={n_ok:5d} rejected={n_failed:5d} {detail}")
+ 
+    if not any(v["n"] for k, v in stats_raw.items()):
         raise RuntimeError(f"No usable tiles under {root_path}")
-
+ 
     for key, target in (("raw", stats_raw), ("norm", stats_norm)):
         mean, std = _stats_from_accumulator(overall[key])
         target["overall"] = {"mean": mean.tolist(), "std": std.tolist(),
-                             "n": sum(v["n"] for k, v in target.items() if k != "overall")}
+                             "n": sum(v["n"] for k, v in target.items()
+                                      if k != "overall")}
     return stats_raw, stats_norm
+
+ 
+def failure_table(stats_raw):
+    """
+    Per-class rejection summary as a DataFrame, from compute_paired_channel_stats.
+ 
+    Parameters
+    ----------
+    stats_raw : dict
+        First element returned by compute_paired_channel_stats.
+ 
+    Returns
+    -------
+    pandas.DataFrame
+        Indexed by class, with columns n_used, n_rejected, reject_pct, and one
+        column per rejection bin encountered.
+    """
+    import pandas as pd
+ 
+    rows = []
+    for name, v in stats_raw.items():
+        if name == "overall":
+            continue
+        total = v["n"] + v["n_failed"]
+        row = {"class": name, "n_used": v["n"], "n_rejected": v["n_failed"],
+               "reject_pct": round(100 * v["n_failed"] / total, 1) if total else 0.0}
+        row.update(v.get("reasons", {}))
+        rows.append(row)
+    return pd.DataFrame(rows).set_index("class").fillna(0).sort_index()
+ 
+ 
+def save_stats(path, **stats_dicts):
+    """
+    Persist stats dicts as JSON so a dead kernel does not cost the numbers.
+ 
+    Parameters
+    ----------
+    path : str or Path
+        Output path; a .json suffix is applied.
+    **stats_dicts
+        Named stats dicts, e.g. nct_raw=..., nct_norm=..., crc_raw=...
+ 
+    Returns
+    -------
+    Path
+    """
+    import json
+ 
+    path = Path(path).with_suffix(".json")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(stats_dicts, indent=2), encoding="utf-8")
+    return path
 
 
 def compute_channel_stats(root_path, n_samples_per_class=200,
@@ -561,12 +679,27 @@ def compute_normalized_channel_stats(root_path, normalizer, n_samples_per_class=
                          "n": sum(v["n"] for k, v in stats.items())}
     return stats
 
+def _reportable_classes(stats_before, stats_after, exclude_keys=("overall",)):
+    """
+    Classes present in both stats dicts with usable statistics.
+
+    Entries with n == 0 carry NaN mean/std by design: compute_paired_channel_stats
+    records fully rejected classes so their counts still appear in the failure
+    table, but their statistics are undefined and must not reach a plot or a
+    ratio. Post-guard this is the expected state of BACK in NCT-CRC-HE-100K.
+    """
+    return [k for k in stats_before
+            if k not in exclude_keys
+            and k in stats_after
+            and stats_before[k].get("n", 1) > 0
+            and stats_after[k].get("n", 1) > 0]
+
 def compute_variance_reduction(stats_before, stats_after, exclude_keys=("overall",)):
     """
     For each class, computes the % reduction in per-channel std after normalization.
     Positive = normalization tightened the distribution (expected direction).
     """
-    classes = [k for k in stats_before.keys() if k not in exclude_keys and k in stats_after]
+    classes = _reportable_classes(stats_before, stats_after, exclude_keys)
     reduction = {}
     for cls in classes:
         std_before = np.array(stats_before[cls]["std"])
@@ -597,7 +730,7 @@ def plot_channel_stats_comparison(stats_before, stats_after, exclude_keys=("over
     Combined figure: mean-color swatch strips (raw, normalized) stacked above
     a grouped bar chart comparing per-channel mean ± std, raw vs. normalized.
     """
-    classes = [k for k in stats_before.keys() if k not in exclude_keys and k in stats_after]
+    classes = _reportable_classes(stats_before, stats_after, exclude_keys)
     channels = ["R", "G", "B"]
     bar_colors = ["#d62728", "#2ca02c", "#1f77b4"]
 

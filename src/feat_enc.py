@@ -19,8 +19,7 @@ from timm.data import resolve_model_data_config
 from torchvision import transforms as T
 
 
-# VERIFY against https://huggingface.co/bioptimus/H-optimus-0 and against
-# m.pretrained_cfg. These are from memory, not from the checkpoint.
+#Verfied from the model card on (HF)[https://huggingface.co/bioptimus/H-optimus-0#how-to-use-it-to-extract-features]
 H_OPTIMUS_MEAN = (0.707223, 0.578729, 0.703617)
 H_OPTIMUS_STD = (0.211883, 0.230117, 0.177517)
 

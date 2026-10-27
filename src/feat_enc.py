@@ -18,6 +18,8 @@ import timm
 from timm.data import resolve_model_data_config
 from torchvision import transforms as T
 
+from . import stain_norm as sn
+
 
 #Verfied from the model card on (HF)[https://huggingface.co/bioptimus/H-optimus-0#how-to-use-it-to-extract-features]
 H_OPTIMUS_MEAN = (0.707223, 0.578729, 0.703617)
@@ -42,7 +44,7 @@ ENCODERS = {
         "kwargs": dict(img_size=TILE_SIZE),
         "mean": None,  # from timm pretrained_cfg
         "std": None,
-        "note": "ViT-G/14, DINOv2 on LVD-142M. Run at 224, off its native 518.",
+        "note": "ViT-G/14, DINOv2. Run at 224.",
     },
     "vit_l16_in21k_ft_in1k": {
         "source": "vit_large_patch16_224.augreg_in21k_ft_in1k",
@@ -120,7 +122,7 @@ def load_encoder(name, device="cuda", dtype=torch.float32, verbose=True):
         "native_size": cfg_size,
         "grid_size": tuple(grid_size) if grid_size else None,
         "n_patches": n_patches,
-        "mean_source": "hardcoded (VERIFY)" if spec["mean"] else "timm pretrained_cfg",
+        "mean_source": "hardcoded" if spec["mean"] else "timm pretrained_cfg",
     }
     if verbose:
         for k, v in info.items():
@@ -147,8 +149,6 @@ def extract_features(model, transform, image_paths, load_fn, normalizer=None,
 
     Returns (features (n, d) float32, ok_mask (n,) bool).
     """
-    import stain_norm as sn
-
     amp_dtype = _autocast_dtype(device)
     feats, ok = [], []
 
@@ -158,7 +158,8 @@ def extract_features(model, transform, image_paths, load_fn, normalizer=None,
         for p in batch_paths:
             arr = load_fn(p)
             if normalizer is not None:
-                norm = sn.normalize_image(p, normalizer)
+                # normalize_array on the array already loaded: one read per tile.
+                norm, _ = sn.normalize_array(arr, normalizer)
                 if norm is None:
                     ok.append(False)   # keep raw arr as fallback
                 else:
@@ -185,11 +186,32 @@ def extract_features(model, transform, image_paths, load_fn, normalizer=None,
     return np.concatenate(feats, axis=0), np.array(ok)
 
 
-def save_features(path, features, labels, ok_mask, info):
+def save_features(path, features, labels, ok_mask, info, manifest_sha256, ranks,
+                  normalized):
+    """
+    Rows are index-aligned with the manifest the features were extracted from.
+    The manifest sha256 and per-row ranks are stored so that splits and
+    label-budgets (class_sampling.split_train_val / label_budgets) can be
+    rebuilt from the cache alone, and so a stale cache is detectable.
+    """
     path = Path(path).with_suffix(".npz")
     path.parent.mkdir(parents=True, exist_ok=True)
     np.savez(path, features=features, labels=np.asarray(labels),
+             ranks=np.asarray(ranks, dtype=np.int64),
              ok_mask=ok_mask, encoder=info["name"], source=info["source"],
              embed_dim=info["embed_dim"], mean=np.asarray(info["mean"]),
-             std=np.asarray(info["std"]))
+             std=np.asarray(info["std"]), manifest_sha256=manifest_sha256,
+             normalized=bool(normalized))
     return path
+
+
+def load_features(path, expected_manifest_sha256=None):
+    """Loads a cache; raises if it was built from a different manifest."""
+    data = dict(np.load(Path(path).with_suffix(".npz")))
+    if "manifest_sha256" not in data:
+        raise ValueError(f"{path}: no manifest_sha256 -- cache predates manifests; re-extract.")
+    sha = str(data["manifest_sha256"])
+    if expected_manifest_sha256 is not None and sha != expected_manifest_sha256:
+        raise ValueError(f"{path}: built from manifest {sha[:12]}, expected "
+                         f"{expected_manifest_sha256[:12]}; re-extract.")
+    return data

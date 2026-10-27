@@ -12,11 +12,14 @@ The project runs a two-stage comparison of pathology foundation models for diagn
 
 **Status**
 
-*Complete (MVP):* 
-- Dataset exploration completed. Basic utilities generated for visualization and data exploration. Normalization explored. Project structure setup.
+*Complete:*
+- **Notebook 01 — data exploration.** Class balance, channel statistics, sample grids and cross-cohort colour shift (NCT-CRC-HE-100K vs. CRC-VAL-HE-7K).
+- **Notebook 02 — stain normalization.** Macenko normalization with a tissue-fraction pre-filter, degenerate-fit rejection and a median virtual target estimated across many tiles (persisted as 8 numbers, applied unchanged to the external cohort). Paired raw/normalized statistics on the same tiles, so variance reduction isn't confounded by dropped background tiles. Deterministic, nested, class-stratified sampling with SHA-256-checked manifests (`manifests/`).
+- **Notebook 03 — feature extraction + linear probe.** Frozen embeddings cached for H-Optimus-0 and a DINOv2 ViT-g/14 control at 224 px (both 1536-d, 256 patches), for each of raw / Macenko on both cohorts, keyed to the manifest hash. Linear probe with 5 seeds and bootstrap confidence intervals, evaluated in-distribution and on the external cohort. Macenko failures fall back to the raw tile and are tracked in an `ok_mask`. First results are in; analysis and cleanup are ongoing (see below).
 
 *In progress / planned:*
-- **Stage 1 frozen-probe benchmark**: H-Optimus-0 vs. ImageNet-ViT control, raw vs. Macenko-normalized, single seed"]
+- **Stage 1 baseline analysis**: per-class confusion matrices, raw-vs-Macenko on the subset of tiles where Macenko succeeded, paired bootstrap, matched regularization across conditions, and a label-efficiency curve.
+- **Stage 2 LoRA arm** on H-Optimus-0, compared against its frozen-probe baseline.
 - **Additional encoders** for the Stage 1 comparison: CTransPath, UNI, or Prov-GigaPath, if access and time allows.
 - **Stain-augmented condition**: random stain-color jitter during training, compared against Macenko normalization as an alternative strategy for handling staining variation.
 - **Multi-seed + confidence intervals**: repeat each experiment across 3-5 random seeds to confirm differences between models are real, not run-to-run noise.
@@ -67,9 +70,15 @@ path-ft-bench/
 ├── pixi.toml / pixi.lock
 ├── assets/ # committed figures and small sample-patch subsets
 ├── src/
+│ ├── stain_norm.py # Macenko normalization, median target, paired stats
+│ ├── class_sampling.py # deterministic stratified sampling + SHA-checked manifests
+│ ├── feat_enc.py # encoder registry, frozen feature extraction, npz cache
+│ ├── probe.py # linear probe, confusion matrix, bootstrap CIs
 │ └── utilities/
 │ ├── data_io.py # extraction, metadata, class counts, channel stats
 │ └── viz.py # plotting and visualization helpers
-├── notebooks/ # exploration, normalization, training, results
+├── manifests/ # tile lists (the artifact of record for every split)
+├── features/ # cached embeddings, keyed to manifest hash (gitignored)
+├── notebooks/ # 01 exploration, 02 normalization, 03 features + probe
 └── data/ # gitignored — pointer scripts only, bulk data not committed
 ```

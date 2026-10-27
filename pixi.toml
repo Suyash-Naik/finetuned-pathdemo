@@ -40,3 +40,6 @@ bioio-tifffile = ">=1.3.0, <2"
 
 [activation.env]
 PYTHONPATH = "./src"
+# conda numpy links MKL (libiomp5md) while the pip torch wheel bundles libomp;
+# the first numpy matmul after a torch CPU op aborts with OMP Error #15.
+KMP_DUPLICATE_LIB_OK = "TRUE"
